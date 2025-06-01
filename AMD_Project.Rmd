@@ -1,0 +1,620 @@
+---
+title: "Multivariate Data Analysis Project"
+author: "Álvaro Capel & Enric Alavedra"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+---
+
+DATASET USADO: https://www.kaggle.com/datasets/ahmedshahriarsakib/usa-real-estate-dataset
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Paso 0: Loading of the data
+
+- Status: sold / for sale
+- Price
+- Bed : number of beds
+- Bath: number of bathrooms
+- Acre_lot: total surface of lot (acres) 
+- Street
+- City
+- State
+- Zip_code
+- House_size: living space in square feet meters
+- Prev_sold_date: previously sold date
+
+El paso 0 es, a partir del dataset original, escoger un subset (seleccionando estado y ciudad) y, con el objetivo de reducir preliminarmente el ruido, se selecciona únicamente los registros que se encuentran dentro del IQR de la variable precio.
+
+DUDA: Quizá estamos siendo demasiado restrictivos con el rango escogido y deberíamos ensanchar el quartile range acceptado? --> Estamos usando una ténica univariante para sacar los outliers de precio. No es una mala idea pero se pueden perder observaciones interesantes, que son esas con precios elevados.Solo vamos a filtrar las variables "acre_lot" y "house_size".
+```{r cars}
+# LOAD OF LIBRARIES
+library(tidyr)
+library(readr)
+library(dplyr)
+# DATASET UPLOAD
+raw_data <- read_csv("data.csv")
+# SUBSET ARRANGEMENT
+# hacer lo que dice en el mail de coger randomly 1k dentro del subset state-city
+raw_data %>%
+  group_by(state) %>%
+  summarise(number_registers = n()) %>%
+  arrange(desc(number_registers))
+
+# FINAL DATASET
+data <- raw_data %>%
+  select("status", "price", "bed", "bath", "acre_lot", "street", "city", "state", "zip_code", "house_size", "prev_sold_date") %>%
+  filter(state == 'Pennsylvania') %>%
+  filter(city == 'Philadelphia') %>%
+  #filter(price >= q1, price <= q3) %>%
+  drop_na()
+```
+## Paso 1: Preliminary data overview: Before Data Cleaning
+
+Siguiendo con el paso 0, antes de cerrar el dataset, visualizamos la distribución de las diferentes variables cuantitativas para ver si hay alguna variable que deberíamos considerar en la detección de outliers.
+```{r}
+# LOAD OF LIBRARIES
+library(ggplot2)
+# VARIABLES OVERVIEW
+head(data)
+# STATISTICAL SUMMARY OF VARIABLES
+summary(data)
+# CATEGORICAL VARIABLES
+# status
+data %>%
+  group_by(status) %>%
+  summarise(number_registers = n())
+# city
+data %>%
+  group_by(city) %>%
+  summarise(number_registers = n())
+# NUMERICAL VARIABLES
+# price
+ggplot(data, aes(x = price)) +
+  geom_histogram(bins = 100, fill = "lightblue", color = "black") +
+  labs(title = "Price distribution", x = "Price (USD)", y = "Frequency")
+# bed
+ggplot(data, aes(x = factor(bed))) +
+  geom_bar(fill = "lightgreen", color = "black") +
+  labs(title = "Distribution of beds number", x = "beds", y = "Frequency")
+# bath
+ggplot(data, aes(x = factor(bath))) +
+  geom_bar(fill = "lightgreen", color = "black") +
+  labs(title = "Distribution of baths number", x = "bath", y = "Frequency")
+# acre_lot
+ggplot(data, aes(x = acre_lot)) +
+  geom_histogram(bins = 20, fill = "orange", color = "black" ) +
+  labs(title = "Total house size (acres)", x = "acres", y = "Frequency") +
+  xlim(0, 0.2)
+# house_size
+ggplot(data, aes(x = house_size)) +
+  geom_histogram(bins = 50, fill = "purple", color = "black") +
+  labs(title = "Total living space", x = "square feet meters", y = "Frequency") +
+  xlim(0, 4500)
+```
+## Paso 2: Variables Variance Overview and Standarization
+
+Una vez ya limpiado el dataset, empezamos a analizar la varianza de las diferentes variables. El primer paso es hacer un overview de la magnitud de varianza para las variables.
+
+Se puede ver que la varianza en las variables "price" y "house_size" es muy significativa. 
+
+DUDA: Antes de runnear el código uno ya puede intuir que la varianza de las variables con valores mayores presentarà mayor varianza. Es correcto asumir que "price" y "house_size" son las variables que presentan mayor varianza o, primeramente, deberíamos normalizar y escalar todas las variables? --> Las variables se estandarizan y, a parte, este proceso se hace previamente a la outliers detection.
+
+```{r}
+means <- sapply(data, mean, na.rm = TRUE)
+sds <- sapply(data, sd, na.rm = TRUE)
+cols_to_scale <- c("price", "acre_lot", "house_size")
+data[cols_to_scale] <- scale(data[cols_to_scale])
+numeric_data <- data %>% 
+  select(where(is.numeric)) %>%
+  select(-street)
+variance <- numeric_data %>%
+  summarise(across(everything(), var, na.rm = TRUE))
+print(variance)
+```
+
+## Paso 3: Final Data Cleaning: Outliers Detection
+
+Vistos los gráficos anteriores, consideramos que las variables "acre_lot" y "house_size" presentan demasiados outliers que generan ruido en el dataset. Para solucionar este problema, decidimos aplicar el mismo proceso que el anterior, es decir, seleccionar solo los registros dentro del IQR.
+
+DUDA: Quizá estamos siendo demasiado restrictivos con el rango escogido y deberíamos ensanchar el quartile range acceptado? --> Lo que hemos hecho aquí es usar un método multivariante: usar la distancia de Mahalanobis para detectar outliers en las variables "acre_lot" y "house_size". Después se debe volver a mirar las distribuciones.
+
+```{r}
+# OUTLIERS DETECTION
+vars <- c("acre_lot", "house_size")
+data_sub <- na.omit(data[ , vars])
+
+center <- colMeans(data_sub)
+cov_matrix <- cov(data_sub)
+
+mahal_dist <- mahalanobis(data_sub, center, cov_matrix)
+threshold <- qchisq(0.25, df = length(vars))
+outliers_mahal <- which(mahal_dist > threshold)
+
+data_outliers <- data_sub[outliers_mahal, ]
+# FINAL DATASETS
+data <- data[-as.numeric(rownames(data_outliers)), ]
+numeric_data <- data %>% 
+  select(where(is.numeric)) %>%
+  select(-street)
+```
+
+```{r}
+# OUTLIERS DETECTION
+variables <- c("acre_lot", "house_size")
+outliers_list <- lapply(variables, function(var) {
+  qL <- quantile(data[[var]], 0.25, na.rm = TRUE)
+  qH <- quantile(data[[var]], 0.75, na.rm = TRUE)
+  iqr <- qH - qL
+  outliers <- data %>%
+    filter(data[[var]] < (qL - 1.5 * iqr) | data[[var]] > (qH + 1.5 * iqr)) %>%
+    mutate(variable = var)
+  return(outliers)
+})
+outliers_combined <- bind_rows(outliers_list)
+head(outliers_combined)
+data <- anti_join(data, outliers_combined[, 1:10])
+numeric_data <- data %>% 
+  select(where(is.numeric)) %>%
+  select(-street)
+```
+
+## Paso 4: Preliminary data overview: After Data Cleaning
+
+Siguiendo con el paso 0, antes de cerrar el dataset, visualizamos la distribución de las diferentes variables cuantitativas para ver si hay alguna variable que deberíamos considerar en la detección de outliers. --> Con la aplicación de outliers detection, se debe volver a aplicar la visualización de las distribuciones (tampoco hemos eliminado muchos outliers, el quit de esta parte es que las variables numéricas quedan estandarizadas)
+```{r}
+# LOAD OF LIBRARIES
+library(ggplot2)
+# VARIABLES OVERVIEW
+head(data)
+# STATISTICAL SUMMARY OF VARIABLES
+summary(data)
+# CATEGORICAL VARIABLES
+# status
+data %>%
+  group_by(status) %>%
+  summarise(number_registers = n())
+# city
+data %>%
+  group_by(city) %>%
+  summarise(number_registers = n())
+# NUMERICAL VARIABLES
+# price
+ggplot(data, aes(x = price)) +
+  geom_histogram(bins = 100, fill = "lightblue", color = "black") +
+  labs(title = "Price distribution", x = "Price (standardized)", y = "Frequency")
+# acre_lot
+ggplot(data, aes(x = acre_lot)) +
+  geom_histogram(bins = 100, fill = "orange", color = "black" ) +
+  labs(title = "Total house size (acres)", x = "acres", y = "Frequency") +
+  xlim(-0.025,0.025)
+# house_size
+ggplot(data, aes(x = house_size)) +
+  geom_histogram(bins = 100, fill = "purple", color = "black") +
+  labs(title = "Total living space", x = "square feet meters", y = "Frequency") + 
+  xlim(-0.5,0.5)
+
+# MAPA DE CALOR DE CORRELACIONES
+library(corrplot)
+library(ggcorrplot)
+
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+corrplot(cor_matrix, method = "color", tl.cex = 0.8, order = "hclust")
+ggcorrplot(cor_matrix, lab = TRUE, lab_size = 2.5, hc.order = TRUE, type = "lower")
+
+```
+
+# PASO QUE NO SE VA A HACER: Variance Analysis: Multidimensional Scaling
+
+La primera técnica usada ha sido el MDS.
+El objetivo que se quiere estudiar usando este método es ver si hay una diferencia significativa entre los registros que tienen diferente "status". Es decir, los registros del dataset pueden tener un status: "for_sale" o "sold" y, la idea aquí es sacar una conclusión sobre si demasiada diferencia entre el precio esperado de venta y el precio de venta real. 
+
+Viendo el output, los puntos con "status" distinto no están claramente separados, incluso se puede ver cierta tendencia a agruparse. Por lo tanto, se puede tener una primera hipótesis de que no hay una diferencia significativa entre status. No obsante, al hacer un hypothesis testing, el p-value resultante nos confirma que podemos rechazar H0, siendo que hay independencia entre los dos status. Por lo tanto, confirmamos que sí hay diferencia significativa entre ambos "status"
+
+DUDA: El razonamiento es correcto? --> Jaime opina que no seria necsario aplicar un MDS
+```{r}
+# LOAD OF LIBRARIES
+library(tidyverse)
+
+# SET-UP
+numeric_data <- data %>%
+  select("price", "bed", "bath", "acre_lot", "house_size") %>%
+  scale()
+
+# MDS 
+distance_matrix <- dist(numeric_data, method = "euclidean")
+mds_result <- cmdscale(distance_matrix, k = 2) 
+
+# VISUALIZATION
+mds_df <- as.data.frame(mds_result)
+data <- data %>%
+  mutate(status_sold = ifelse(status == "sold", 1, 0))
+colnames(mds_df) <- c("Dim1", "Dim2")
+ggplot(mds_df, aes(x = Dim1, y = Dim2, color = data$status_sold)) +
+  geom_point(alpha = 0.7) +
+  scale_color_viridis_c() +
+  labs(title = "Multidimensional Scaling (Status)", color = "Status") +
+  theme_minimal()
+
+# HYPOTHESIS TESTING VALIDATION
+# Filtrar por status
+sold_prices <- data$price[data$status == "sold"]
+for_sale_prices <- data$price[data$status == "for_sale"]
+
+# Test de normalidad (opcional)
+shapiro.test(sold_prices) # La data no sigue una distribución normal
+shapiro.test(for_sale_prices)
+
+# Hypothesis test para data sin distribución normal
+wilcox.test(price ~ status, data = data)
+```
+
+# Paso 5: Variance Analysis: PCA
+
+La segunda técnica que vamos a aplicar va a ser el PCA, con el objetivo de ver si existen direcciones principales suficientemente notorias capaces de aglutinar gran parte de la varianza. 
+
+Los resultados obtenidos usando el PCA son que, primeramente, las dos principales direcciones son capaces de representar el 68% de la varianza que, aún no siendo muy alta, se puede considerar una aproximación buena. Entorno a las variables: se puede observar que "price" tiene una contribuciñon fuerte y cierta asociación tanto con DIM 1 y DIM 2, aparte de estar alineada con "house_size" y "bath" parece. En el caso de "house_size" y "bath", al apuntar hacia la misma dirección, tienen una correlación positiva. En el caso de "bed" y "acre_lot", su contribución es menor (vectores más cortos), y parecen estar más asociados con la DIM 2 que la DIM 1. 
+
+DUDA: En el punto anterior hemos visto que hay diferencia significativa entre "stuatus", aunque se ha considerado en este estudio todo en el ismo saco. Quizá es un error, nos gustaría tener feedback en este sentido --> No acabo de encontrar una forma visual de distinguir entre "status". Los dos primeros componentes aglutinan 78% de la varianza
+```{r}
+# LOAD OF LIBRARIES
+library(FactoMineR)
+library(factoextra)
+# PCA
+# Having this dataset, it is important to, firstly, scale the variables as we are using inputs with very different magnitudes for their values
+#numeric_data <- data %>% 
+  #select(where(is.numeric))
+#numeric_data <- bind_cols(data[, 1, drop = FALSE], numeric_data)
+#numeric_data <- numeric_data %>% select(-street)
+pca_result <- PCA(numeric_data, graph = FALSE)
+# OBSERVATIONS
+#PC1-PC2
+fviz_pca_ind(pca_result, 
+             geom.ind = "point",
+             col.ind = "cos2", # Color según calidad de representación
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)
+#PC1-PC3
+fviz_pca_ind(pca_result, 
+             geom.ind = "point",
+             col.ind = "cos2", # Color según calidad de representación
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             axes = c(1,3))
+#PC2-PC3
+fviz_pca_ind(pca_result, 
+             geom.ind = "point",
+             col.ind = "cos2", # Color según calidad de representación
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             axes = c(2,3))
+# VARIABLES
+#PC1-PC2
+fviz_pca_var(pca_result, 
+             col.var = "contrib", # Color según contribución
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE)
+#PC1-PC3
+fviz_pca_var(pca_result, 
+             col.var = "contrib", # Color según contribución
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             axes = c(1,3))
+#PC2-PC3
+fviz_pca_var(pca_result, 
+             col.var = "contrib", # Color según contribución
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,
+             axes = c(2,3))
+# VARIANCE EXPLAINED
+var_explained <- pca_result$eig[, "percentage of variance"]
+cum_var_explained <- cumsum(var_explained)
+var_explained_123 <- cum_var_explained[3]
+num_components <- which(cum_var_explained >= 80)[1]
+print(num_components)
+print(var_explained_123)
+
+```
+
+A parte, se van a usar los resultados del PCA para hacer un ANOVA y ver que si la variable "status" explica diferencias significativas en las componentes principales. 
+En el caso de tener p-value resultante menor a 0.05, se puede afirmar que hay diferencias significativas según "status".
+```{r}
+#numeric_data <- numeric_data %>% select(-status)
+pca_result <- prcomp(numeric_data, scale. = TRUE)
+
+pca_scores <- as.data.frame(pca_result$x)
+pca_scores$status <- data$status
+
+summary(aov(PC1 ~ status, data = pca_scores))
+summary(aov(PC2 ~ status, data = pca_scores))
+summary(aov(PC3 ~ status, data = pca_scores))
+```
+También, se aprovecha los resultados del PCA para ver la contribución en la varianza total de cada variable.
+```{r}
+# LOAD OF LIBRARIES
+library(FactoMineR)
+library(factoextra)
+
+pca_result_facto <- PCA(numeric_data, scale.unit = TRUE, graph = FALSE)
+
+fviz_contrib(pca_result_facto, choice = "var", axes = 1) 
+fviz_contrib(pca_result_facto, choice = "var", axes = 2) 
+fviz_contrib(pca_result_facto, choice = "var", axes = 3) 
+fviz_contrib(pca_result_facto, choice = "var", axes = 1:3) 
+
+total_contrib <- rowSums(pca_result_facto$var$contrib[, 1:3])
+sort(total_contrib, decreasing = TRUE)
+```
+
+# Paso 6: Variance Analysis: Factorial Analysis
+
+Con el proceso anterior se ha podido observar, a partir de la varianza, si existen correlaciones entre las diferentes variables. Para tener unas conclusiones más robustas en este sentido, se aplica un Factorial Analysis para ver si existen factores latentes capaces de mostrar "atributos" no visibles. En el proceso de realizar un Factorial Analysis, aparece un hyperparámetro que serían el número de factores a ser identificados: para escoger el valor que más se adecua, se ha usado un Parallel Analysis
+
+Los resultados muestran 3 facotres diferentes: 
+El Factor 1, que se podría definir como "Economico", el cual explica totalmente la variable "precio" y parcialmente "bath".
+El Factor 2, que es capaz de explicar fuertemente la variable "bed", lo podríamos definir como "Número de habitaciones"
+El Facotr 3, que explica notoriamente las variables "acre_lot" y "house_size", podría decirse como "Espacional".
+
+```{r}
+# LOAD OF LIBRARIES
+library(psych)
+library(ggplot2)
+# FACTOR ANALYSIS
+#factorial_data <- numeric_data %>% select(-1)
+# Hyperparameter: number of facotrs to be discovered: 2
+numeric_data_fa <- numeric_data %>% 
+  #select(-house_size) %>%
+  #select(-acre_lot) %>%
+  mutate(status = data$status) %>%
+  filter(status == "sold") %>%
+  select(-status)
+fa.parallel(numeric_data_fa, fa = "fa", n.iter = 100)
+fa_result <- fa(numeric_data_fa, nfactors = 3, rotate = "varimax", fm = "ml")
+# RESULTS
+# Loadings
+factor_loadings <- fa_result$loadings
+loadings_df <- as.data.frame(factor_loadings)
+# Communalities
+factor_communalities <- fa_result$communalities # Low values for bath and acre_lot
+
+factor_scores <- as.data.frame(fa_result$scores)
+ggplot(factor_scores, aes(x = ML1, y = ML2)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  labs(title = "Factorial Analysis Biplot",
+       x = "Factor 1", y = "Factor 2") +
+  theme_minimal()
+
+fa.diagram(fa_result)
+print(fa_result)
+```
+## Paso 7: Clusterización jerárquica
+Como alternativa a la clasificación, propuesto por Jaime, una buena opción sería hacer un cluster jerárquico -> Me cuesta sacar conclusiones de los resultados 
+```{r}
+# LOAD OF LIBRARIES
+library(stats)   
+library(dendextend) 
+library(ggplot2)
+
+numeric_data_fa <- numeric_data %>% 
+  #select(-house_size) %>%
+  #select(-acre_lot) %>%
+  mutate(status = data$status) %>%
+  filter(status == "sold") %>%
+  select(-status)
+dist_mat <- dist(numeric_data_fa, method = "euclidean") # Distances Matrix
+linkages <- c("ward.D2", "single", "complete", "average")
+hclust_results <- list()
+coph_corrs <- numeric(length(linkages))
+for (i in seq_along(linkages)) {
+  method <- linkages[i]
+  cat("Procesando linkage:", method, "\n")
+
+    hc <- hclust(dist_mat, method = method)
+  hclust_results[[method]] <- hc
+  
+  # Correlación cofenética
+  coph_dist <- cophenetic(hc)
+  coph_corrs[i] <- cor(dist_mat, coph_dist)
+  cat("Correlación cofenética:", coph_corrs[i], "\n")
+}
+
+data.frame(Linkage = linkages, Cophenetic_Correlation = coph_corrs) %>%
+  print()
+
+# 5. Plot dendrograma del método Ward (que suele ser más robusto)
+plot(hclust_results[["ward.D2"]],
+     main = "Dendrograma con linkage Ward.D2",
+     xlab = "", sub = "", cex = 0.6, labels = FALSE)
+# Encontrar los clusters resultantes
+rect.hclust(hclust_results[["ward.D2"]], k = 3, border = "red")
+#rect.hclust(hclust_results[["ward.D2"]], k = 5, border = "red")
+
+# PROCESO DE PROFILING DE LOS CLUSTERS DEL JERÁRQUICO
+# 1. Asignar etiquetas de cluster
+clusters <- cutree(hclust_results[["ward.D2"]], k = 3)
+
+# 2. Añadir los clusters a los datos originales
+clustered_data <- numeric_data_fa %>%
+  mutate(Cluster = as.factor(clusters))  # como factor para análisis
+
+# 3. Resumen estadístico por cluster
+cluster_summary <- clustered_data %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), list(mean = mean, sd = sd), .names = "{.col}_{.fn}"))
+
+print(cluster_summary)
+
+library(tidyr)
+
+clustered_data_long <- clustered_data %>%
+  pivot_longer(-Cluster, names_to = "Variable", values_to = "Valor")
+
+ggplot(clustered_data_long, aes(x = Cluster, y = Valor, fill = Cluster)) +
+  geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  theme_minimal() +
+  labs(title = "Distribución de variables por cluster")
+
+```
+
+## Paso 8:K-means Clusterization
+
+Creemos que con las 3 técnicas usadas parece suficiente para entender la varianza, las correlaciones, el dataset en general. No obstante, una clasificación (hemos escogido un método no-jerárquica ya que creemos que se adecua mejor al dataset que tenemos) podría dar unos resultados que permitan tener unas conclusiones más sólidas: aquí sí hemos distinguido entre status, para ver si en la clusterización se construyen clusters diferenciados según el status. Aquí también aparece un hyperparámetro, el número de clusters a ser ploteados. Para escoger el mejor valor, se usa el método del codo. 
+
+DUDA: Los resultados parecen mostrar que no hay una diferencia notoria entre los clusters de los dos "status", por lo que sería un input más para decidir que no hay una diferencia significativa entre los registros de ambos "status". No acabamos de entender la contradicción entre esta técnica y los resultados vistos en el MDS --> Aplicamos diferentes métodos para seleccionar el número de clusters. La distancia debe ser euclidean, ideal para datasets con datos escalados. --> Hacer una clasificación jerarquica y usar fuzzy clustering para ver mejor la transición entre clusters
+```{r}
+# LOAD OF LIBRARIES
+library(factoextra)
+library(NbClust)
+library(ggplot2)
+library(FactoMineR)
+set.seed(123)
+
+# NUMBER OF CLUSTERS TO BE PLOTTED
+numeric_data_fa <- numeric_data %>% 
+  #select(-house_size) %>%
+  #select(-acre_lot) %>%
+  mutate(status = data$status) %>%
+  filter(status == "sold") %>%
+  select(-status)
+scaled_data <- scale(numeric_data_fa)
+# ELBOW METHOD
+fviz_nbclust(scaled_data, kmeans, method = "wss") + 
+    labs(title = "Elbow method (WSS)") +
+  geom_vline(xintercept = 4, linetype = 2, color = "red")
+# SILHOUETTE METHOD
+nb_sil <- NbClust(scaled_data, distance = "euclidean", min.nc = 2, max.nc = 10,
+                  method = "kmeans", index = "silhouette")
+# CALINSKI-HARABASZ METHOD
+nb_ch <- NbClust(scaled_data, distance = "euclidean", min.nc = 2, max.nc = 10,
+                 method = "kmeans", index = "ch")
+# DAVIES-BOULDIN
+  nb_db <- NbClust(scaled_data, distance = "euclidean", min.nc = 2, max.nc = 10,
+                   method = "kmeans", index = "db")
+cat("Silhouette: ", nb_sil$Best.nc[1], "\n")
+cat("Calinski-Harabasz: ", nb_ch$Best.nc[1], "\n")
+cat("Davies-Bouldin: ", nb_db$Best.nc[1], "\n")
+# K-MEANS ALGORITHM 
+set.seed(123) 
+kmeans_result <- kmeans(scaled_data, centers = 2, nstart = 25)
+fviz_cluster(kmeans_result, data = scaled_data)
+
+# PROCESO DE PROFILING
+clustered_data_kmeans <- numeric_data_fa %>%
+  mutate(Cluster = as.factor(kmeans_result$cluster))
+cluster_summary_kmeans <- clustered_data_kmeans %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), 
+                   list(mean = mean, sd = sd), 
+                   .names = "{.col}_{.fn}"))
+
+print(cluster_summary_kmeans)
+library(tidyr)
+
+clustered_data_long_kmeans <- clustered_data_kmeans %>%
+  pivot_longer(-Cluster, names_to = "Variable", values_to = "Valor")
+
+ggplot(clustered_data_long_kmeans, aes(x = Cluster, y = Valor, fill = Cluster)) +
+  geom_boxplot() +
+  facet_wrap(~ Variable, scales = "free", ncol = 3) +
+  theme_minimal() +
+  labs(title = "Distribución de variables por cluster (K-Means)")
+
+````
+# VISUALIZATION
+pca_data <- PCA(numeric_data_fa, graph = FALSE)
+pca_df <- data.frame(pca_data$ind$cos2[,1:2])
+pca_df$cluster <- as.factor(kmeans_result$cluster)
+
+ggplot(pca_df, aes(x = Dim.1, y = Dim.2, color = cluster))+
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "Clustering K-means (visualizado con PCA)") +
+  theme_minimal()
+```
+
+## Paso 9: Fuzzy Clustering
+Iteración del proceso de k-means que va a permitir visualizar mejor la transición entre los clusters
+```{r}
+# LOAD OF LIBRARIES
+library(e1071)
+library(ggplot2)
+
+# fuzzy c-means clustering
+set.seed(123)
+numeric_data_fa <- numeric_data %>% 
+  #select(-house_size) %>%
+  #select(-acre_lot) %>%
+  mutate(status = data$status) %>%
+  filter(status == "sold") %>%
+  select(-status)
+fcm_result <- cmeans(numeric_data_fa, centers = 3, m = 10, iter.max = 100, verbose = FALSE)
+print(fcm_result)
+
+# Grados de pertenencia
+head(fcm_result$membership)
+
+# Cluster duro asignado (el cluster con mayor pertenencia)
+head(fcm_result$cluster)
+
+# Visualización: con PCA para 2D (como hiciste con k-means)
+pca_data <- PCA(numeric_data_fa, graph = FALSE)
+pca_df <- data.frame(pca_data$ind$cos2[,1:2])
+pca_df$cluster_fuzzy <- as.factor(fcm_result$cluster)
+
+ggplot(pca_df, aes(x = Dim.1, y = Dim.2, color = cluster_fuzzy)) +
+  geom_point(alpha = 0.7, size = 2) +
+  labs(title = "Fuzzy C-means clustering (visualizado con PCA)") +
+  theme_minimal()
+
+```
+
+# EXTRA: Algoritmos para Price Prediction 
+
+Una vez hecho todo este estudio, nos damos cuenta de que el dataset parece ser un uen candidato para aplicar algún método de predicción de alguna variable, por ejemplo, el precio. Las razones que nos han hecho decidir que es una buena opción son:
+
+1. La variable "price" presenta una variabilidad significativa, de modo que hay algo a poder predecir. 
+2. Existencia de dependencia entre las variables escogidas y el target: tal y como hemos visto aplicando las técnicas anteriores, sí existe una correlación. A parte, la correlación no es suficientemente alta como para que exista una colinealidad entre variables, de modo que es un contexto bueno para realizar el proceso de predicción. 
+3. Tenemos un dataset grande y suficiente para aplicar métodos de predicción
+
+DUDA: Obtenemos un Rsquared demasiado bajo en ambos procesos. Necesitaríamos un poco de feedback para entender si quizá nos estamos dejando algo importante en el planteamineto o código. 
+
+PROCESO DE REGRESIÓN LINEAL: 
+```{r}
+# LOAD OF LIBRARIES
+library(tidyverse)
+library(caret)  
+
+# DATA PREPARATION
+data_filtered <- data %>%
+  filter(status == "for_sale") %>%
+  select(price, bed, bath, acre_lot, house_size) %>%
+  mutate(across(where(is.numeric), ~ (.-mean(., na.rm = TRUE)) / sd(., na.rm = TRUE)))
+
+# TRAIN/TEST SPLIT
+set.seed(123)
+indexes <- sample(1:nrow(data_filtered), size = 0.8 * nrow(data_filtered))
+train_data <- data_filtered[indexes, ]
+test_data <- data_filtered[-indexes, ]
+
+# MODEL
+model_lm <- lm(price ~ bed + bath + acre_lot + house_size, data = train_data)
+summary(model_lm)
+
+# PREDICTIONS
+predictions <- predict(model_lm, newdata = test_data)
+
+# MÉTRICAS DE EVALUACIÓN DEL MODELO
+actuals <- test_data$price
+rmse <- sqrt(mean((actuals - predictions)^2))
+mae <- mean(abs(actuals - predictions))
+r2 <- cor(actuals, predictions)^2
+
+cat("RMSE:", rmse, "\nMAE:", mae, "\nR²:", r2, "\n")
+
+```
+
+## Aspectos aún pendientes
+- Estudio del efecto que tiene "street", "status" en los resultados (emplear técnicas para entender su implicación)
